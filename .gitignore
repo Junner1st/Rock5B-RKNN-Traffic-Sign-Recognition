@@ -1,0 +1,8 @@
+*.zip
+*.pt
+best_rknn_model
+*.rknn
+*.onnx
+data/
+__pycache__
+*.pyc
