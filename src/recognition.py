@@ -152,11 +152,14 @@ class RollingFPS:
 
 
 class RKNNDetector:
-    def __init__(self, model_path: Path, input_size: int, conf: float, iou: float):
+    def __init__(self, model_path: Path, input_size: int, conf: float, iou: float, input_layout: str = "nhwc"):
         self.model_path = model_path
         self.input_size = int(input_size)
         self.conf = conf
         self.iou = iou
+        self.input_layout = input_layout.lower()
+        if self.input_layout not in {"nhwc", "nchw"}:
+            raise ValueError(f"Unsupported RKNN input layout: {input_layout}")
         self.rknn = RKNNLite()
         self.names = load_names(model_path)
 
@@ -181,6 +184,8 @@ class RKNNDetector:
         t0 = time.perf_counter()
         model_input, ratio, pad = letterbox(frame, self.input_size)
         model_input = cv2.cvtColor(model_input, cv2.COLOR_BGR2RGB)
+        if self.input_layout == "nchw":
+            model_input = model_input.transpose(2, 0, 1)
         model_input = np.expand_dims(np.ascontiguousarray(model_input), axis=0)
         t1 = time.perf_counter()
 
@@ -424,6 +429,7 @@ def process_video(
     iou: float,
     input_size: int,
     log_interval: float,
+    input_layout: str = "nhwc",
 ) -> RecognitionStats:
     ensure_paths(video_path, model_path)
     cap = cv2.VideoCapture(str(video_path))
@@ -443,7 +449,7 @@ def process_video(
     next_log = time.perf_counter() + max(0.1, log_interval)
 
     try:
-        with RKNNDetector(model_path, input_size, conf, iou) as detector:
+        with RKNNDetector(model_path, input_size, conf, iou, input_layout=input_layout) as detector:
             while True:
                 ret, frame = cap.read()
                 if not ret:
@@ -495,6 +501,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conf", type=float, default=CONFIDENCE)
     parser.add_argument("--iou", type=float, default=IOU)
     parser.add_argument("--input-size", type=int, default=INPUT_SIZE)
+    parser.add_argument("--input-layout", choices=("nhwc", "nchw"), default="nhwc")
     parser.add_argument("--log-interval", type=float, default=LOG_INTERVAL)
     return parser.parse_args()
 
@@ -510,6 +517,7 @@ def main() -> None:
         conf=args.conf,
         iou=args.iou,
         input_size=args.input_size,
+        input_layout=args.input_layout,
         log_interval=args.log_interval,
     )
     print("=== Recognition Summary ===")

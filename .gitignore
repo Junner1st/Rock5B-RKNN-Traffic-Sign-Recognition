@@ -6,3 +6,4 @@ best_rknn_model
 data/
 __pycache__
 *.pyc
+.venv/

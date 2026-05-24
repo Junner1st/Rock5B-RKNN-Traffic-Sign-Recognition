@@ -1,0 +1,28 @@
+[project]
+name = "rock5b-rknn-traffic-sign-recognition"
+version = "0.1.0"
+description = "Rock5B/RK3588 RKNN export and recognition bridge."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "numpy<2",
+    "opencv-python>=4.8",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+export = [
+    "onnx<1.19.0",
+    "onnxslim>=0.1.71",
+    "pillow>=10.0.1",
+    "rknn-toolkit2>=2.3.2",
+    "setuptools>=70,<81",
+    "ultralytics>=8.3.0",
+]
+runtime = [
+    "rknn-toolkit-lite2==2.3.2",
+]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'linux'",
+]
