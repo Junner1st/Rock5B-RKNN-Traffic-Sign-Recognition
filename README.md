@@ -96,6 +96,8 @@ Useful flags:
 | `--no-save-video` | Run recognition and print speed statistics without writing an output video. |
 | `--max-frames N` | Process only the first `N` frames. |
 | `--log-interval 0` | Disable periodic progress logs. |
+| `--temperature-interval SECONDS` | Sample Linux thermal-zone temperatures at this interval. |
+| `--no-temperature-log` | Disable temperature sampling. |
 | `--conf VALUE` | Detection confidence threshold. |
 | `--iou VALUE` | NMS IOU threshold. |
 
@@ -110,6 +112,7 @@ At the end, the program prints:
 - average time per frame
 - average recognition per second
 - total detections counted
+- thermal-zone temperature summaries when enabled
 
 Example:
 
@@ -185,6 +188,8 @@ python3 src/yolo_ver_comp_bridge.py test \
   --report-yaml ../yolo-ver-comp/runs/run_yolo11n_1/reports/test_report_rknn.yaml \
   --report-md ../yolo-ver-comp/runs/run_yolo11n_1/reports/test_report_rknn.md
 ```
+
+Dataset and video bridge tests record `/sys/class/thermal/thermal_zone*` readings by default. The YAML report includes raw samples under `temperature.samples` and per-sensor summaries under `temperature.sensors`; the Markdown report includes a temperature table and an NPU temperature SVG curve when an `npu` thermal sensor is available. Use `--temperature-interval` to change the sampling cadence, or `--no-temperature-log` to disable it.
 
 Video test:
 

@@ -9,6 +9,7 @@ import numpy as np
 import yaml
 
 from recognition import Detection, RKNNDetector, annotate_frame
+from thermal_monitor import TemperatureMonitor
 
 IMAGE_EXTENSIONS = ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp")
 
@@ -26,6 +27,7 @@ class ImageTestResult:
     overall: dict[str, float | None]
     per_class: list[dict[str, float | int | str | None]]
     image_count: int
+    temperature: dict
 
 
 def run_dataset_test(
@@ -39,6 +41,7 @@ def run_dataset_test(
     conf: float,
     iou: float,
     input_layout: str = "nhwc",
+    temperature_interval: float | None = 1.0,
 ) -> ImageTestResult:
     images = image_paths(dataset_root, split)
     predictions: dict[Path, list[Detection]] = {}
@@ -49,26 +52,32 @@ def run_dataset_test(
     print(f"Images: {len(images)} ({split})")
     print(f"Output directory: {output_dir}")
 
-    with RKNNDetector(model_path, input_size, conf, iou, input_layout=input_layout) as detector:
-        names = names or detector.names
-        output_dir.mkdir(parents=True, exist_ok=True)
+    temperature_monitor = TemperatureMonitor(temperature_interval)
+    temperature_monitor.start()
+    try:
+        with RKNNDetector(model_path, input_size, conf, iou, input_layout=input_layout) as detector:
+            names = names or detector.names
+            output_dir.mkdir(parents=True, exist_ok=True)
 
-        for index, image_path in enumerate(images, start=1):
-            frame = cv2.imread(str(image_path))
-            if frame is None:
-                raise RuntimeError(f"Failed to read image: {image_path}")
+            for index, image_path in enumerate(images, start=1):
+                frame = cv2.imread(str(image_path))
+                if frame is None:
+                    raise RuntimeError(f"Failed to read image: {image_path}")
 
-            detections, image_timings = detector.predict(frame)
-            predictions[image_path] = detections
-            for key, value in image_timings.items():
-                timings[key] += value
+                detections, image_timings = detector.predict(frame)
+                predictions[image_path] = detections
+                for key, value in image_timings.items():
+                    timings[key] += value
 
-            if image_path in preview_images:
-                annotated = annotate_frame(frame, detections, names)
-                cv2.imwrite(str(output_dir / image_path.name), annotated)
+                if image_path in preview_images:
+                    annotated = annotate_frame(frame, detections, names)
+                    cv2.imwrite(str(output_dir / image_path.name), annotated)
 
-            if index == 1 or index % 25 == 0 or index == len(images):
-                print(f"RKNN tested {index}/{len(images)} images")
+                temperature_monitor.sample_due()
+                if index == 1 or index % 25 == 0 or index == len(images):
+                    print(f"RKNN tested {index}/{len(images)} images")
+    finally:
+        temperature = temperature_monitor.finish()
 
     ground_truths = {
         image_path: read_yolo_label(label_path_for_image(image_path), image_path)
@@ -86,6 +95,7 @@ def run_dataset_test(
         overall=overall,
         per_class=per_class,
         image_count=image_count,
+        temperature=temperature,
     )
 
 

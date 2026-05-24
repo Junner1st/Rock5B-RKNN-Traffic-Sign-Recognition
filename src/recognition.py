@@ -15,6 +15,7 @@ import cv2
 import config
 import numpy as np
 from rknnlite.api import RKNNLite
+from thermal_monitor import TemperatureMonitor
 
 VIDEO_PATH = config.RECOGNITION_VIDEO_PATH
 MODEL_PATH = config.RECOGNITION_MODEL_PATH
@@ -44,6 +45,7 @@ class RecognitionStats:
     annotation_time: float = 0.0
     detections_total: int = 0
     rolling_fps_samples: List[float] = field(default_factory=list)
+    temperature: dict = field(default_factory=dict)
 
     @property
     def detection_time(self) -> float:
@@ -430,6 +432,7 @@ def process_video(
     input_size: int,
     log_interval: float,
     input_layout: str = "nhwc",
+    temperature_interval: float | None = 1.0,
 ) -> RecognitionStats:
     ensure_paths(video_path, model_path)
     cap = cv2.VideoCapture(str(video_path))
@@ -447,6 +450,8 @@ def process_video(
     rolling = RollingFPS(window_seconds=1.0)
     stats = RecognitionStats()
     next_log = time.perf_counter() + max(0.1, log_interval)
+    temperature_monitor = TemperatureMonitor(temperature_interval)
+    temperature_monitor.start()
 
     try:
         with RKNNDetector(model_path, input_size, conf, iou, input_layout=input_layout) as detector:
@@ -468,6 +473,7 @@ def process_video(
                 stats.inference_time += timings["inference"]
                 stats.postprocess_time += timings["postprocess"]
                 stats.rolling_fps_samples.append(current_fps)
+                temperature_monitor.sample_due()
 
                 if video_sink is not None:
                     t0 = time.perf_counter()
@@ -487,6 +493,7 @@ def process_video(
         cap.release()
         if video_sink is not None:
             video_sink.close()
+        stats.temperature = temperature_monitor.finish()
 
     return stats
 
@@ -502,6 +509,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--iou", type=float, default=IOU)
     parser.add_argument("--input-size", type=int, default=INPUT_SIZE)
     parser.add_argument("--input-layout", choices=("nhwc", "nchw"), default="nhwc")
+    parser.add_argument("--temperature-interval", type=float, default=1.0)
+    parser.add_argument("--no-temperature-log", action="store_true")
     parser.add_argument("--log-interval", type=float, default=LOG_INTERVAL)
     return parser.parse_args()
 
@@ -518,6 +527,7 @@ def main() -> None:
         iou=args.iou,
         input_size=args.input_size,
         input_layout=args.input_layout,
+        temperature_interval=None if args.no_temperature_log else args.temperature_interval,
         log_interval=args.log_interval,
     )
     print("=== Recognition Summary ===")

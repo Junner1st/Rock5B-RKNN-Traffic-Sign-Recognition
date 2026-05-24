@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes.util
+import html
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,8 @@ def parse_args() -> argparse.Namespace:
     test_parser.add_argument("--report-yaml", type=Path, required=True)
     test_parser.add_argument("--report-md", type=Path, required=True)
     test_parser.add_argument("--max-images", type=int, default=12)
+    test_parser.add_argument("--temperature-interval", type=float, default=1.0)
+    test_parser.add_argument("--no-temperature-log", action="store_true")
     test_parser.add_argument("--no-save-video", action="store_true")
     test_parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -96,6 +99,7 @@ def run_video_mode(args: argparse.Namespace, rknn_model: Path) -> dict[str, Any]
         iou=args.iou,
         input_size=args.input_size,
         input_layout=args.input_layout,
+        temperature_interval=None if args.no_temperature_log else args.temperature_interval,
         log_interval=1.0,
     )
     speed = {
@@ -118,6 +122,7 @@ def run_video_mode(args: argparse.Namespace, rknn_model: Path) -> dict[str, Any]
         "per_class": [],
         "speed": speed,
         "ms_per_img": speed,
+        "temperature": stats.temperature,
     }
 
 
@@ -138,6 +143,7 @@ def run_dataset_mode(args: argparse.Namespace, rknn_model: Path) -> dict[str, An
         conf=args.conf,
         iou=args.iou,
         input_layout=args.input_layout,
+        temperature_interval=None if args.no_temperature_log else args.temperature_interval,
     )
     speed = dict(result.speed_ms)
     if "total" not in speed:
@@ -152,17 +158,22 @@ def run_dataset_mode(args: argparse.Namespace, rknn_model: Path) -> dict[str, An
         "per_class": result.per_class,
         "speed": speed,
         "ms_per_img": speed,
+        "temperature": result.temperature,
     }
 
 
 def write_reports(report: dict[str, Any], yaml_path: Path, md_path: Path) -> None:
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.parent.mkdir(parents=True, exist_ok=True)
+    temperature_plot = write_npu_temperature_plot(report, md_path)
     yaml_path.write_text(yaml.safe_dump(report, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    md_path.write_text(markdown_report(report), encoding="utf-8")
+    md_path.write_text(
+        markdown_report(report, temperature_plot.name if temperature_plot else None),
+        encoding="utf-8",
+    )
 
 
-def markdown_report(report: dict[str, Any]) -> str:
+def markdown_report(report: dict[str, Any], temperature_plot_name: str | None = None) -> str:
     overall = report.get("overall", {})
     lines = [
         f"# {str(report.get('split', 'test')).title()} RKNN Report",
@@ -186,6 +197,34 @@ def markdown_report(report: dict[str, Any]) -> str:
             if key in speed:
                 lines.append(f"| {key} | {format_value(speed.get(key))} |")
 
+    temperature = report.get("temperature", {})
+    sensors = temperature.get("sensors", {})
+    if sensors:
+        lines.extend(
+            [
+                "",
+                "## Temperature",
+                "",
+                f"- Samples: {temperature.get('sample_count', 0)}",
+                f"- Interval: {format_value(temperature.get('interval_s'))} s",
+            ]
+        )
+        if temperature_plot_name:
+            lines.extend(["", f"![NPU temperature curve]({temperature_plot_name})"])
+        lines.extend(
+            [
+                "",
+                "| Sensor | Start C | End C | Min C | Max C | Avg C |",
+                "| --- | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for name, summary in sensors.items():
+            lines.append(
+                f"| {name} | {format_value(summary.get('start_c'))} | "
+                f"{format_value(summary.get('end_c'))} | {format_value(summary.get('min_c'))} | "
+                f"{format_value(summary.get('max_c'))} | {format_value(summary.get('avg_c'))} |"
+            )
+
     rows = report.get("per_class", [])
     if rows:
         lines.extend(["", "## Per Class", "", "| Class ID | Name | mAP50-95 |", "| ---: | --- | ---: |"])
@@ -198,6 +237,112 @@ def markdown_report(report: dict[str, Any]) -> str:
 
 def seconds_to_ms_per_frame(seconds: float, count: int) -> float:
     return 0.0 if count == 0 else seconds * 1000.0 / count
+
+
+def write_npu_temperature_plot(report: dict[str, Any], md_path: Path) -> Path | None:
+    temperature = report.get("temperature", {})
+    samples = temperature.get("samples", [])
+    if not isinstance(samples, list):
+        return None
+
+    sensor_name = npu_sensor_name(samples)
+    if sensor_name is None:
+        remove_stale_temperature_plot(md_path)
+        return None
+
+    points = temperature_points(samples, sensor_name)
+    if len(points) < 2:
+        remove_stale_temperature_plot(md_path)
+        return None
+
+    plot_path = md_path.with_name(f"{md_path.stem}_npu_temperature.svg")
+    plot_path.write_text(render_temperature_svg(points, sensor_name), encoding="utf-8")
+    return plot_path
+
+
+def remove_stale_temperature_plot(md_path: Path) -> None:
+    try:
+        md_path.with_name(f"{md_path.stem}_npu_temperature.svg").unlink()
+    except FileNotFoundError:
+        pass
+
+
+def npu_sensor_name(samples: list[dict[str, Any]]) -> str | None:
+    for sample in samples:
+        temperatures = sample.get("temperatures_c", {})
+        if not isinstance(temperatures, dict):
+            continue
+        for name in temperatures:
+            if "npu" in str(name).lower():
+                return str(name)
+    return None
+
+
+def temperature_points(samples: list[dict[str, Any]], sensor_name: str) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+    for sample in samples:
+        temperatures = sample.get("temperatures_c", {})
+        if not isinstance(temperatures, dict) or sensor_name not in temperatures:
+            continue
+        try:
+            elapsed = float(sample.get("elapsed_s", 0.0))
+            value = float(temperatures[sensor_name])
+        except (TypeError, ValueError):
+            continue
+        points.append((elapsed, value))
+    return points
+
+
+def render_temperature_svg(points: list[tuple[float, float]], sensor_name: str) -> str:
+    width, height = 720, 260
+    left, right, top, bottom = 58, 22, 30, 45
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    min_time, max_time = points[0][0], points[-1][0]
+    temps = [point[1] for point in points]
+    min_temp, max_temp = min(temps), max(temps)
+    if max_temp == min_temp:
+        min_temp -= 0.5
+        max_temp += 0.5
+    else:
+        padding = max(0.25, (max_temp - min_temp) * 0.12)
+        min_temp -= padding
+        max_temp += padding
+
+    def sx(value: float) -> float:
+        if max_time == min_time:
+            return left + plot_width / 2.0
+        return left + (value - min_time) * plot_width / (max_time - min_time)
+
+    def sy(value: float) -> float:
+        return top + (max_temp - value) * plot_height / (max_temp - min_temp)
+
+    polyline = " ".join(f"{sx(elapsed):.2f},{sy(temp):.2f}" for elapsed, temp in points)
+    circles = "\n".join(
+        f'    <circle cx="{sx(elapsed):.2f}" cy="{sy(temp):.2f}" r="3.5">'
+        f"<title>{elapsed:.2f}s: {temp:.3f} C</title></circle>"
+        for elapsed, temp in points
+    )
+    title = html.escape(f"{sensor_name} temperature")
+    sample_count = len(points)
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{title}">
+  <title>{title}</title>
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  <text x="{left}" y="20" font-family="Arial, sans-serif" font-size="14" font-weight="700" fill="#1f2933">{title} ({sample_count} samples)</text>
+  <line x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}" stroke="#94a3b8" stroke-width="1"/>
+  <line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}" stroke="#94a3b8" stroke-width="1"/>
+  <line x1="{left}" y1="{sy(max(temps)):.2f}" x2="{left + plot_width}" y2="{sy(max(temps)):.2f}" stroke="#e2e8f0" stroke-width="1"/>
+  <line x1="{left}" y1="{sy(min(temps)):.2f}" x2="{left + plot_width}" y2="{sy(min(temps)):.2f}" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="{left - 8}" y="{sy(max(temps)) + 4:.2f}" text-anchor="end" font-family="Arial, sans-serif" font-size="11" fill="#475569">{max(temps):.1f} C</text>
+  <text x="{left - 8}" y="{sy(min(temps)) + 4:.2f}" text-anchor="end" font-family="Arial, sans-serif" font-size="11" fill="#475569">{min(temps):.1f} C</text>
+  <text x="{left}" y="{height - 16}" text-anchor="start" font-family="Arial, sans-serif" font-size="11" fill="#475569">{min_time:.1f}s</text>
+  <text x="{left + plot_width}" y="{height - 16}" text-anchor="end" font-family="Arial, sans-serif" font-size="11" fill="#475569">{max_time:.1f}s</text>
+  <polyline points="{polyline}" fill="none" stroke="#2563eb" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+  <g fill="#ffffff" stroke="#2563eb" stroke-width="2">
+{circles}
+  </g>
+</svg>
+"""
 
 
 def format_value(value: Any) -> str:
